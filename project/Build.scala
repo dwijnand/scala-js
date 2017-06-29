@@ -376,10 +376,10 @@ object Build {
     def withScalaJSJUnitPlugin: Project = {
       project.settings(
         scalacOptions in Test ++= {
+          val jar = (packageBin in (jUnitPlugin, Compile)).value
           if (isGeneratingEclipse) {
             Seq.empty
           } else {
-            val jar = (packageBin in (jUnitPlugin, Compile)).value
             Seq(s"-Xplugin:$jar")
           }
         }
@@ -532,36 +532,41 @@ object Build {
           "com.novocode" % "junit-interface" % "0.9" % "test"
       ),
       testOptions += Tests.Argument(TestFrameworks.JUnit, "-v", "-a"),
-      testOptions += Tests.Setup { () =>
-        val testOutDir = (streams.value.cacheDirectory / "scalajs-compiler-test")
-        IO.createDirectory(testOutDir)
-        sys.props("scala.scalajs.compiler.test.output") =
-          testOutDir.getAbsolutePath
-        sys.props("scala.scalajs.compiler.test.scalajslib") =
-          (packageBin in (LocalProject("library"), Compile)).value.getAbsolutePath
+      testOptions += {
+        val taskStreams = streams.value
+        val scalajslib = (packageBin in (LocalProject("library"), Compile)).value
+        val scalaV = scalaVersion.value
+        Tests.Setup { () =>
+          val testOutDir = (taskStreams.cacheDirectory / "scalajs-compiler-test")
+          IO.createDirectory(testOutDir)
+          sys.props("scala.scalajs.compiler.test.output") =
+            testOutDir.getAbsolutePath
+          sys.props("scala.scalajs.compiler.test.scalajslib") =
+            scalajslib.getAbsolutePath
 
-        def scalaArtifact(name: String): String = {
-          def isTarget(att: Attributed[File]) = {
-            att.metadata.get(moduleID.key).exists { mId =>
-              mId.organization == "org.scala-lang" &&
-              mId.name == name &&
-              mId.revision == scalaVersion.value
+          def scalaArtifact(name: String): String = {
+            def isTarget(att: Attributed[File]) = {
+              att.metadata.get(moduleID.key).exists { mId =>
+                mId.organization == "org.scala-lang" &&
+                mId.name == name &&
+                mId.revision == scalaV
+              }
+            }
+
+            (managedClasspath in Test).value.find(isTarget).fold {
+              taskStreams.log.error(s"Couldn't find $name on the classpath")
+              ""
+            } { lib =>
+              lib.data.getAbsolutePath
             }
           }
 
-          (managedClasspath in Test).value.find(isTarget).fold {
-            streams.value.log.error(s"Couldn't find $name on the classpath")
-            ""
-          } { lib =>
-            lib.data.getAbsolutePath
-          }
+          sys.props("scala.scalajs.compiler.test.scalalib") =
+            scalaArtifact("scala-library")
+
+          sys.props("scala.scalajs.compiler.test.scalareflect") =
+            scalaArtifact("scala-reflect")
         }
-
-        sys.props("scala.scalajs.compiler.test.scalalib") =
-          scalaArtifact("scala-library")
-
-        sys.props("scala.scalajs.compiler.test.scalareflect") =
-          scalaArtifact("scala-reflect")
       },
       exportJars := true
   ).dependsOnSource(irProject)
@@ -781,10 +786,12 @@ object Build {
   ).dependsOn(tools, jsEnvs, testAdapter)
 
   lazy val delambdafySetting = {
-    scalacOptions ++= (
+    scalacOptions ++= {
+        val scalaBinaryV = scalaBinaryVersion.value
         if (isGeneratingEclipse) Seq()
-        else if (scalaBinaryVersion.value == "2.10") Seq()
-        else Seq("-Ydelambdafy:method"))
+        else if (scalaBinaryV == "2.10") Seq()
+        else Seq("-Ydelambdafy:method")
+    }
   }
 
   private def serializeHardcodedIR(base: File,
@@ -956,6 +963,8 @@ object Build {
         val sources = mutable.ListBuffer.empty[File]
         val paths = mutable.Set.empty[String]
 
+        val log = streams.value.log
+
         for {
           srcDir <- sourceDirectories
           normSrcDir = normPath(srcDir)
@@ -970,7 +979,7 @@ object Build {
             if (paths.add(path))
               sources += src
             else
-              streams.value.log.debug(s"not including $src")
+              log.debug(s"not including $src")
           }
         }
 
@@ -1268,6 +1277,7 @@ object Build {
 
     Seq(
       testOptionTags := {
+        val thisProjectId = thisProject.value.id
         @tailrec
         def envTagsFor(env: JSEnv): Seq[String] = env match {
           case env: NodeJSEnv =>
@@ -1277,7 +1287,7 @@ object Build {
                 sys.error("You must install Node.js source map support to " +
                     "run the full Scala.js test suite (npm install " +
                     "source-map-support). To deactivate source map " +
-                    "tests, do: set jsEnv in " + thisProject.value.id +
+                    "tests, do: set jsEnv in " + thisProjectId +
                     " := NodeJSEnv().value.withSourceMap(false)")
               }
               baseArgs :+ "source-maps"
@@ -1392,8 +1402,8 @@ object Build {
        * Note that a testSuite/test will not trigger a compile when sources are
        * modified in require-sam
        */
+      val testDir = (sourceDirectory in Test).value
       if (supportsSAM) {
-        val testDir = (sourceDirectory in Test).value
         val sharedTestDir =
           testDir.getParentFile.getParentFile.getParentFile / "shared/src/test"
 
@@ -1419,10 +1429,11 @@ object Build {
 
       // Fail if we are not in the right stage.
       testHtmlKey in Test := (testHtmlKey in Test).dependsOn(Def.task {
-        if (scalaJSStage.value != targetStage) {
+        val stage = scalaJSStage.value
+        if (stage != targetStage) {
           sys.error("In the Scala.js test-suite, the testHtml* tasks need " +
               "scalaJSStage to be set to their respecitve stage. Stage is: " +
-              scalaJSStage.value)
+              stage)
         }
       }).value
   )
@@ -1693,16 +1704,15 @@ object Build {
       },
 
       sources in Compile := {
+        // Partest sources and some sources of sbtplugin (see above)
+        val baseSrcs = (sources in Compile).value
+        // Sources for tools (and hence IR)
+        val toolSrcs = (sources in (tools, Compile)).value
+        val jsenvBase = ((scalaSource in (jsEnvs, Compile)).value /
+          "org/scalajs/jsenv")
         if (shouldPartest.value) {
-          // Partest sources and some sources of sbtplugin (see above)
-          val baseSrcs = (sources in Compile).value
-          // Sources for tools (and hence IR)
-          val toolSrcs = (sources in (tools, Compile)).value
           // Sources for js-envs
           val jsenvSrcs = {
-            val jsenvBase = ((scalaSource in (jsEnvs, Compile)).value /
-              "org/scalajs/jsenv")
-
             val scalaFilter: FileFilter = "*.scala"
             val files = (
                 (jsenvBase * scalaFilter) +++

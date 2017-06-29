@@ -238,6 +238,7 @@ object ScalaJSPluginInternal {
         val output = (artifactPath in key).value
 
         Def.task {
+          val linker = (scalaJSLinker in key).value
           FileFunction.cached(s.cacheDirectory, FileInfo.lastModified,
               FileInfo.exists) { _ => // We don't need the files
 
@@ -250,7 +251,6 @@ object ScalaJSPluginInternal {
 
             IO.createDirectory(output.getParentFile)
 
-            val linker = (scalaJSLinker in key).value
             linker.link(ir, moduleInitializers,
                 AtomicWritableFileVirtualJSFile(output),
                 sbtLogger2ToolsLogger(log))
@@ -426,14 +426,16 @@ object ScalaJSPluginInternal {
 
       skip in packageScalaJSLauncherInternal := {
         val value = !persistLauncherInternal.value
+        val useMainModuleInitializer = scalaJSUseMainModuleInitializer.value
+        val moduleKind = scalaJSModuleKind.value
         if (!value) {
-          if (scalaJSUseMainModuleInitializer.value) {
+          if (useMainModuleInitializer) {
             throw new MessageOnlyException(
                 "persistLauncher := true is not compatible with using a main " +
                 "module initializer (scalaJSUseMainModuleInitializer := " +
                 "true), nor is it necessary, since fastOptJS/fullOptJS " +
                 "includes the call to the main method")
-          } else if (scalaJSModuleKind.value != ModuleKind.NoModule) {
+          } else if (moduleKind != ModuleKind.NoModule) {
             throw new MessageOnlyException(
                 "persistLauncher := true is not compatible with emitting " +
                 "JavaScript modules")
@@ -557,6 +559,7 @@ object ScalaJSPluginInternal {
         val attManifests = jsDependencyManifests.value
 
         // Verify semantics compliance
+        val semantics = scalaJSSemantics.value
         if (checkScalaJSSemantics.value) {
           import ComplianceRequirement._
           val requirements = mergeFromManifests(attManifests.data)
@@ -565,7 +568,7 @@ object ScalaJSPluginInternal {
            * unreasonably overridden values for the fastOptJS and fullOptJS
            * tasks. Otherwise, this check is bogus.
            */
-          checkCompliance(requirements, scalaJSSemantics.value)
+          checkCompliance(requirements, semantics)
         }
 
         // Collect originating files
@@ -604,10 +607,12 @@ object ScalaJSPluginInternal {
       },
 
       resolvedJSEnv := jsEnv.?.value.getOrElse {
+        val jsDomNodeJsEnv = JSDOMNodeJSEnv().value
+        val nodeJsEnv = NodeJSEnv().value
         if (scalaJSRequestsDOM.value) {
-          JSDOMNodeJSEnv().value
+          jsDomNodeJsEnv
         } else {
-          NodeJSEnv().value
+          nodeJsEnv
         }
       },
 
@@ -766,11 +771,11 @@ object ScalaJSPluginInternal {
           }
         } else {
           Def.task {
+            val moduleKind = scalaJSModuleKind.value
+            val moduleIdentifier = scalaJSModuleIdentifier.value
             (mainClass in scalaJSLauncherInternal).value.fold {
               sys.error("No main class detected.")
             } { mainClass =>
-              val moduleKind = scalaJSModuleKind.value
-              val moduleIdentifier = scalaJSModuleIdentifier.value
               val memLaunch =
                 memLauncher(mainClass, moduleKind, moduleIdentifier)
               Attributed[VirtualJSFile](memLaunch)(

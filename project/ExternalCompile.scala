@@ -44,6 +44,8 @@ object ExternalCompile {
 
         // Compile
 
+        val run = (runner in compile).value
+        val forkInCompile = (fork in compile).value
         val cachedCompile = FileFunction.cached(cacheDir / "compile",
             FileInfo.lastModified, FileInfo.exists) { (dependencies: Set[File]) =>
 
@@ -74,7 +76,6 @@ object ExternalCompile {
           }
 
           def doCompile(sourcesArgs: List[String]): Unit = {
-            val run = (runner in compile).value
             run.run("scala.tools.nsc.Main", compilerCp,
                 "-cp" :: cpStr ::
                 "-d" :: classesDirectory.getAbsolutePath() ::
@@ -86,7 +87,7 @@ object ExternalCompile {
           /* Crude way of overcoming the Windows limitation on command line
            * length.
            */
-          if ((fork in compile).value && isWindows &&
+          if (forkInCompile && isWindows &&
               (sourcesArgs.map(_.length).sum > 1536)) {
             IO.withTemporaryFile("sourcesargs", ".txt") { sourceListFile =>
               IO.writeLines(sourceListFile, sourcesArgs)
